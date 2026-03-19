@@ -15,6 +15,8 @@ var _values: Dictionary = {}
 var _defaults: Dictionary = {}
 var _sections: Dictionary = {}  # section_id -> { display_name, container, header, ref_count, controls }
 var _control_nodes: Dictionary = {}  # full_key -> control node
+var _control_configs: Dictionary = {}  # full_key -> config dict
+var _section_scripts: Dictionary = {}  # section_id -> script res:// path
 
 
 func _ready() -> void:
@@ -46,9 +48,11 @@ func toggle_window() -> void:
 	_window.visible = not _window.visible
 
 
-func register_section(section_id: String, display_name: String) -> void:
+func register_section(section_id: String, display_name: String, script_path: String = "") -> void:
 	if not _is_debug:
 		return
+	if not script_path.is_empty():
+		_section_scripts[section_id] = script_path
 	if _sections.has(section_id):
 		_sections[section_id].ref_count += 1
 		return
@@ -75,6 +79,7 @@ func register_control(section_id: String, key: String, config: Dictionary) -> vo
 	_defaults[full_key] = default_value
 	if not _values.has(full_key):
 		_values[full_key] = default_value
+	_control_configs[full_key] = config
 	var control_type: String = config.get("type", "")
 	var control_node: Control = null
 	match control_type:
@@ -178,10 +183,20 @@ func _create_window() -> void:
 	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_scroll.add_child(_main_vbox)
 
+	var btn_row := HBoxContainer.new()
+	outer_vbox.add_child(btn_row)
+
 	var copy_btn := Button.new()
 	copy_btn.text = "Copy All Values"
+	copy_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	copy_btn.pressed.connect(copy_all_values_to_clipboard)
-	outer_vbox.add_child(copy_btn)
+	btn_row.add_child(copy_btn)
+
+	var bake_btn := Button.new()
+	bake_btn.text = "Bake to Source"
+	bake_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bake_btn.pressed.connect(bake_all_values)
+	btn_row.add_child(bake_btn)
 
 	add_child(_window)
 
@@ -585,3 +600,182 @@ func _format_number(val: Variant, is_int: bool) -> String:
 	if is_int:
 		return str(int(val))
 	return "%.2f" % val
+
+
+# --- Bake to Source ---
+
+func bake_all_values() -> void:
+	if not _is_debug:
+		return
+	# Group controls by script path
+	var script_controls: Dictionary = {}
+	for section_id in _sections:
+		var script_path: String = _section_scripts.get(section_id, "")
+		if script_path.is_empty():
+			continue
+		var section_data: Dictionary = _sections[section_id]
+		for full_key in section_data.controls:
+			if not _control_configs.has(full_key):
+				continue
+			var config: Dictionary = _control_configs[full_key]
+			if config.get("type", "") == "button":
+				continue
+			if not script_controls.has(script_path):
+				script_controls[script_path] = []
+			script_controls[script_path].append({
+				"full_key": full_key,
+				"config": config,
+			})
+
+	var files_modified := 0
+	for script_path in script_controls:
+		var file := FileAccess.open(script_path, FileAccess.READ)
+		if file == null:
+			print("[gdtuner] ERROR: Cannot read %s" % script_path)
+			continue
+		var source: String = file.get_as_text()
+		file.close()
+
+		var modified := false
+		for entry in script_controls[script_path]:
+			var full_key: String = entry.full_key
+			var config: Dictionary = entry.config
+			var key: String = full_key.get_slice("/", 1)
+			var current_value: Variant = _values.get(full_key)
+			var new_source := _bake_control_value(source, config, key, current_value)
+			if new_source != source:
+				source = new_source
+				modified = true
+
+		if modified:
+			file = FileAccess.open(script_path, FileAccess.WRITE)
+			if file:
+				file.store_string(source)
+				file.close()
+				files_modified += 1
+				print("[gdtuner] Baked values to %s" % script_path)
+
+	print("[gdtuner] Bake complete — %d file(s) modified" % files_modified)
+
+
+func _bake_control_value(source: String, config: Dictionary, key: String, value: Variant) -> String:
+	var control_type: String = config.get("type", "")
+	var method_name: String
+	var default_arg_index: int  # 0-based, counting from after opening paren
+	match control_type:
+		"float":
+			method_name = "add_float"
+			default_arg_index = 3
+		"int":
+			method_name = "add_int"
+			default_arg_index = 3
+		"bool":
+			method_name = "add_bool"
+			default_arg_index = 1
+		"color":
+			method_name = "add_color"
+			default_arg_index = 1
+		"dropdown":
+			method_name = "add_dropdown"
+			default_arg_index = 2
+		"vector2":
+			method_name = "add_vector2"
+			default_arg_index = 1
+		"vector3":
+			method_name = "add_vector3"
+			default_arg_index = 1
+		_:
+			return source
+
+	# Find the method call for this key
+	var regex := RegEx.new()
+	regex.compile(method_name + '\\s*\\(\\s*"' + key + '"')
+	var result := regex.search(source)
+	if result == null:
+		return source
+
+	# Find the opening paren and its matching close
+	var paren_start := source.find("(", result.get_start())
+	var paren_end := _find_matching_paren(source, paren_start)
+	if paren_end < 0:
+		return source
+
+	var args_str := source.substr(paren_start + 1, paren_end - paren_start - 1)
+	var args := _split_args(args_str)
+	if default_arg_index >= args.size():
+		return source
+
+	# Format the new value
+	var new_value_str: String
+	match control_type:
+		"float":
+			new_value_str = str(value)
+		"int":
+			new_value_str = str(int(value))
+		"bool":
+			new_value_str = "true" if value else "false"
+		"color":
+			new_value_str = "Color(%s, %s, %s, %s)" % [value.r, value.g, value.b, value.a]
+		"vector2":
+			new_value_str = "Vector2(%s, %s)" % [value.x, value.y]
+		"vector3":
+			new_value_str = "Vector3(%s, %s, %s)" % [value.x, value.y, value.z]
+		"dropdown":
+			var options: Array = config.get("options", [])
+			var idx := options.find(value)
+			if idx < 0:
+				idx = 0
+			new_value_str = str(idx)
+
+	# Preserve surrounding whitespace in the argument
+	var old_arg: String = args[default_arg_index]
+	var trimmed := old_arg.strip_edges()
+	var prefix := old_arg.substr(0, old_arg.find(trimmed))
+	var suffix := old_arg.substr(old_arg.find(trimmed) + trimmed.length())
+	args[default_arg_index] = prefix + new_value_str + suffix
+
+	var new_args_str := ",".join(args)
+	return source.substr(0, paren_start + 1) + new_args_str + source.substr(paren_end)
+
+
+func _find_matching_paren(source: String, open_pos: int) -> int:
+	var depth := 0
+	for i in range(open_pos, source.length()):
+		var ch: String = source[i]
+		if ch == "(" or ch == "[":
+			depth += 1
+		elif ch == ")" or ch == "]":
+			depth -= 1
+			if depth == 0:
+				return i
+	return -1
+
+
+func _split_args(args_str: String) -> Array[String]:
+	var args: Array[String] = []
+	var depth := 0
+	var in_string := false
+	var current := ""
+	var prev_ch := ""
+	for i in range(args_str.length()):
+		var ch: String = args_str[i]
+		if ch == '"' and prev_ch != "\\":
+			in_string = not in_string
+			current += ch
+		elif in_string:
+			current += ch
+		elif ch == "(" or ch == "[":
+			depth += 1
+			current += ch
+		elif ch == ")" or ch == "]":
+			depth -= 1
+			current += ch
+		elif ch == "," and depth == 0:
+			args.append(current)
+			current = ""
+		else:
+			current += ch
+		prev_ch = ch
+	if not current.is_empty():
+		args.append(current)
+	return args

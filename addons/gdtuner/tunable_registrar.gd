@@ -25,7 +25,7 @@ func _ready() -> void:
 		return
 	var tuner := _get_tuner()
 	if tuner:
-		tuner.register_section(section_id, section_name)
+		tuner.register_section(section_id, section_name, get_script().resource_path)
 		_register_tunables()
 
 

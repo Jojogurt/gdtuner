@@ -71,6 +71,7 @@ func _on_tuner_changed(key: String, value: Variant) -> void:
 | `toggle_window()` | Show/hide the tuner window (also bound to F12). |
 | `copy_all_values_to_clipboard()` | Copies all current values as text to clipboard. |
 | `get_all_values_as_string()` | Returns all current values as a formatted string. |
+| `bake_all_values()` | Rewrites default values in your GDScript source files to match current tuned values. |
 
 | Signal | Description |
 |--------|-------------|
@@ -94,9 +95,27 @@ Override `_register_tunables()` and use these methods:
 
 **Exports:** `section_name` (display name), `section_id` (auto-generated from name if empty).
 
+## Bake to Source
+
+Click **Bake to Source** in the tuner window to rewrite the default values directly in your GDScript files. No copy-paste needed.
+
+Before:
+```gdscript
+add_float("intensity", 0.0, 5.0, 1.0, 0.05)
+add_color("color", Color(1, 1, 1, 1))
+```
+
+After baking with tuned values:
+```gdscript
+add_float("intensity", 0.0, 5.0, 1.35, 0.05)
+add_color("color", Color(1, 0.8, 0.3, 1))
+```
+
+All control types are supported: float, int, bool, color, dropdown, vector2, vector3.
+
 ## Usage with Claude Code
 
-Workflow for transferring tuned values back to your code:
+Alternatively, use **Copy All Values** and paste into Claude Code:
 
 1. Run your game, press F12 to open the tuner
 2. Adjust sliders/controls until the game feels right
