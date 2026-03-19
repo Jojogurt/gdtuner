@@ -8,7 +8,10 @@ signal value_changed(key: String, value: Variant)
 signal button_pressed(key: String)
 
 var _is_debug: bool = false
+var _is_mobile: bool = false
 var _window: Window = null
+var _overlay: CanvasLayer = null
+var _sheet: PanelContainer = null
 var _scroll: ScrollContainer = null
 var _main_vbox: VBoxContainer = null
 var _values: Dictionary = {}
@@ -23,7 +26,26 @@ func _ready() -> void:
 	_is_debug = OS.is_debug_build()
 	if not _is_debug:
 		return
-	_create_window()
+	_is_mobile = OS.get_name() in ["iOS", "Android"]
+	if _is_mobile:
+		_create_sheet()
+	else:
+		_create_window()
+
+
+var _tap_count: int = 0
+var _tap_timer: float = 0.0
+const TAP_WINDOW := 0.4  # seconds to register triple-tap
+
+
+func _process(delta: float) -> void:
+	if not _is_debug or not _is_mobile:
+		return
+	if _tap_count > 0:
+		_tap_timer += delta
+		if _tap_timer > TAP_WINDOW:
+			_tap_count = 0
+			_tap_timer = 0.0
 
 
 func _input(event: InputEvent) -> void:
@@ -32,6 +54,14 @@ func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_F12:
 			toggle_window()
+	# Triple-tap with 3 fingers to toggle on mobile
+	if _is_mobile and event is InputEventScreenTouch and event.pressed:
+		if event.index == 0:
+			_tap_count += 1
+			_tap_timer = 0.0
+			if _tap_count >= 3:
+				toggle_window()
+				_tap_count = 0
 
 
 # --- Public API ---
@@ -43,9 +73,14 @@ func get_value(key: String, fallback: Variant = null) -> Variant:
 
 
 func toggle_window() -> void:
-	if not _is_debug or _window == null:
+	if not _is_debug:
 		return
-	_window.visible = not _window.visible
+	if _is_mobile:
+		if _overlay:
+			_overlay.visible = not _overlay.visible
+	else:
+		if _window:
+			_window.visible = not _window.visible
 
 
 func register_section(section_id: String, display_name: String, script_path: String = "") -> void:
@@ -147,31 +182,20 @@ func get_all_values_as_string() -> String:
 	return "\n".join(lines)
 
 
-# --- Window Creation ---
+# --- UI Creation ---
 
-func _create_window() -> void:
-	_window = Window.new()
-	_window.title = "gdtuner"
-	_window.size = Vector2i(380, 650)
-	_window.unfocusable = true
-	_window.always_on_top = true
-	_window.wrap_controls = true
-	_window.visible = false
-	_window.close_requested.connect(_on_window_close_requested)
-	_position_window()
-
-	var panel := PanelContainer.new()
-	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	_window.add_child(panel)
-
+func _build_content(parent: Control) -> void:
 	var margin := MarginContainer.new()
 	margin.add_theme_constant_override("margin_left", 8)
 	margin.add_theme_constant_override("margin_right", 8)
 	margin.add_theme_constant_override("margin_top", 8)
 	margin.add_theme_constant_override("margin_bottom", 8)
-	panel.add_child(margin)
+	margin.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(margin)
 
 	var outer_vbox := VBoxContainer.new()
+	outer_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	margin.add_child(outer_vbox)
 
 	_scroll = ScrollContainer.new()
@@ -198,16 +222,77 @@ func _create_window() -> void:
 	bake_btn.pressed.connect(bake_all_values)
 	btn_row.add_child(bake_btn)
 
-	add_child(_window)
 
-
-func _position_window() -> void:
+func _create_window() -> void:
+	_window = Window.new()
+	_window.title = "gdtuner"
+	_window.size = Vector2i(380, 650)
+	_window.unfocusable = true
+	_window.always_on_top = true
+	_window.wrap_controls = true
+	_window.visible = false
+	_window.close_requested.connect(func() -> void: _window.visible = false)
 	var screen_size := DisplayServer.screen_get_size()
 	_window.position = Vector2i(screen_size.x - _window.size.x - 50, 50)
 
+	var panel := PanelContainer.new()
+	panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	_window.add_child(panel)
+	_build_content(panel)
 
-func _on_window_close_requested() -> void:
-	_window.visible = false
+	add_child(_window)
+
+
+func _create_sheet() -> void:
+	_overlay = CanvasLayer.new()
+	_overlay.layer = 100
+	_overlay.visible = false
+	add_child(_overlay)
+
+	# Full-screen dimmed background — tap to close
+	var bg := ColorRect.new()
+	bg.color = Color(0, 0, 0, 0.1)
+	bg.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	bg.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventScreenTouch and event.pressed:
+			_overlay.visible = false
+	)
+	_overlay.add_child(bg)
+
+	# Bottom sheet panel — covers bottom 60% of screen
+	_sheet = PanelContainer.new()
+	_sheet.anchor_left = 0.0
+	_sheet.anchor_right = 1.0
+	_sheet.anchor_top = 0.4
+	_sheet.anchor_bottom = 1.0
+	_sheet.offset_left = 0.0
+	_sheet.offset_right = 0.0
+	_sheet.offset_top = 0.0
+	_sheet.offset_bottom = 0.0
+	var sheet_style := StyleBoxFlat.new()
+	sheet_style.bg_color = Color(0.12, 0.12, 0.12, 0.95)
+	sheet_style.corner_radius_top_left = 16
+	sheet_style.corner_radius_top_right = 16
+	_sheet.add_theme_stylebox_override("panel", sheet_style)
+	_overlay.add_child(_sheet)
+
+	# Drag handle at top
+	var handle_container := VBoxContainer.new()
+	handle_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	handle_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_sheet.add_child(handle_container)
+
+	var handle_bar := ColorRect.new()
+	handle_bar.color = Color(0.4, 0.4, 0.4, 1.0)
+	handle_bar.custom_minimum_size = Vector2(40, 4)
+	handle_bar.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	var handle_margin := MarginContainer.new()
+	handle_margin.add_theme_constant_override("margin_top", 8)
+	handle_margin.add_theme_constant_override("margin_bottom", 4)
+	handle_margin.add_child(handle_bar)
+	handle_container.add_child(handle_margin)
+
+	_build_content(handle_container)
 
 
 # --- Section UI ---
