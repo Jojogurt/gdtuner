@@ -113,11 +113,11 @@ func handle_register_section(section_id: String, display_name: String) -> void:
 		return
 	var section_data := {
 		"display_name": display_name,
-		"container": null as Control,
-		"header": null as Button,
-		"content": null as VBoxContainer,
+		"container": null,
+		"header": null,
+		"content": null,
 		"ref_count": 1,
-		"controls": [] as Array[String],
+		"controls": [],
 		"collapsed": false,
 	}
 	_build_section_ui(section_id, section_data)

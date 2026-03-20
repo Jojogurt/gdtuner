@@ -1,8 +1,11 @@
 @tool
 extends EditorPlugin
 
-var _debugger: EditorDebuggerPlugin = null
-var _panel: Control = null
+const TunerPanel := preload("res://addons/gdtuner/editor/tuner_panel.gd")
+const TunerDebugger := preload("res://addons/gdtuner/editor/tuner_debugger.gd")
+
+var _debugger = null
+var _panel = null
 
 
 func _enter_tree() -> void:
@@ -13,10 +16,10 @@ func _enter_tree() -> void:
 		preload("res://addons/gdtuner/icon.svg")
 	)
 
-	_panel = preload("res://addons/gdtuner/editor/tuner_panel.gd").new()
+	_panel = TunerPanel.new()
 	_panel.custom_minimum_size = Vector2(0, 200)
 
-	_debugger = preload("res://addons/gdtuner/editor/tuner_debugger.gd").new()
+	_debugger = TunerDebugger.new()
 	_debugger.panel = _panel
 
 	_panel.request_set_value.connect(func(full_key: String, value_str: String) -> void:
