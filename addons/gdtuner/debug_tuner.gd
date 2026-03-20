@@ -1,14 +1,17 @@
 extends Node
 
 ## Central manager for gdtuner. Registered as autoload singleton "DebugTuner".
-## Creates and manages a separate Window with tuning controls.
-## In release builds, all operations are no-ops with zero cost.
+## When running from the editor, controls appear in the "gdtuner" bottom panel
+## via EditorDebuggerPlugin. Otherwise, a separate Window (desktop) or bottom
+## sheet (mobile) is used as fallback. Release builds are zero-cost no-ops.
 
 signal value_changed(key: String, value: Variant)
 signal button_pressed(key: String)
 
 var _is_debug: bool = false
 var _is_mobile: bool = false
+var _editor_mode: bool = false
+var _suppress_editor_notify: bool = false
 var _window: Window = null
 var _overlay: CanvasLayer = null
 var _sheet: PanelContainer = null
@@ -27,41 +30,77 @@ func _ready() -> void:
 	if not _is_debug:
 		return
 	_is_mobile = OS.get_name() in ["iOS", "Android"]
-	if _is_mobile:
+	if not _is_mobile and EngineDebugger.is_active():
+		_editor_mode = true
+		EngineDebugger.register_message_capture("gdtuner", _on_editor_message)
+	elif _is_mobile:
 		_create_sheet()
 	else:
 		_create_window()
 
 
-var _tap_count: int = 0
-var _tap_timer: float = 0.0
-const TAP_WINDOW := 0.4  # seconds to register triple-tap
+const SHAKE_THRESHOLD := 25.0  # m/s² — strong shake required
+const SHAKE_COUNT_REQUIRED := 2  # number of shakes needed
+const SHAKE_WINDOW := 1.0  # seconds to complete all shakes
+var _shake_count: int = 0
+var _shake_timer: float = 0.0
+var _was_above_threshold: bool = false
 
 
 func _process(delta: float) -> void:
 	if not _is_debug or not _is_mobile:
 		return
-	if _tap_count > 0:
-		_tap_timer += delta
-		if _tap_timer > TAP_WINDOW:
-			_tap_count = 0
-			_tap_timer = 0.0
+	if _shake_count > 0:
+		_shake_timer += delta
+		if _shake_timer > SHAKE_WINDOW:
+			_shake_count = 0
+			_shake_timer = 0.0
+	var accel := Input.get_accelerometer()
+	# Subtract gravity (~9.8 on Y) to get user acceleration magnitude
+	var user_accel := accel - Vector3(0, -9.8, 0)
+	var magnitude := user_accel.length()
+	if magnitude > SHAKE_THRESHOLD:
+		if not _was_above_threshold:
+			_was_above_threshold = true
+			_shake_count += 1
+			if _shake_count == 1:
+				_shake_timer = 0.0
+			if _shake_count >= SHAKE_COUNT_REQUIRED:
+				toggle_window()
+				_shake_count = 0
+	else:
+		_was_above_threshold = false
 
 
 func _input(event: InputEvent) -> void:
-	if not _is_debug:
+	if not _is_debug or _editor_mode:
 		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_F12:
 			toggle_window()
-	# Triple-tap with 3 fingers to toggle on mobile
-	if _is_mobile and event is InputEventScreenTouch and event.pressed:
-		if event.index == 0:
-			_tap_count += 1
-			_tap_timer = 0.0
-			if _tap_count >= 3:
-				toggle_window()
-				_tap_count = 0
+
+
+# --- Editor Debugger Messages ---
+
+func _on_editor_message(message: String, data: Array) -> bool:
+	match message:
+		"set_value":
+			var full_key: String = data[0]
+			var value: Variant = str_to_var(data[1])
+			_suppress_editor_notify = true
+			_set_value(full_key, value)
+			_suppress_editor_notify = false
+		"press_button":
+			var full_key: String = data[0]
+			print("[gdtuner:action] %s pressed (from editor)" % full_key)
+			button_pressed.emit(full_key)
+		"bake":
+			bake_all_values()
+		"copy_values":
+			copy_all_values_to_clipboard()
+		_:
+			return false
+	return true
 
 
 # --- Public API ---
@@ -100,7 +139,10 @@ func register_section(section_id: String, display_name: String, script_path: Str
 		"controls": [],
 		"collapsed": false,
 	}
-	_build_section_ui(section_id, section_data)
+	if _editor_mode:
+		EngineDebugger.send_message("gdtuner:register_section", [section_id, display_name, script_path])
+	else:
+		_build_section_ui(section_id, section_data)
 	_sections[section_id] = section_data
 
 
@@ -108,13 +150,20 @@ func register_control(section_id: String, key: String, config: Dictionary) -> vo
 	if not _is_debug:
 		return
 	var full_key := section_id + "/" + key
-	if _control_nodes.has(full_key):
+	if _control_configs.has(full_key):
 		return
 	var default_value: Variant = config.get("default")
 	_defaults[full_key] = default_value
 	if not _values.has(full_key):
 		_values[full_key] = default_value
 	_control_configs[full_key] = config
+
+	if _editor_mode:
+		EngineDebugger.send_message("gdtuner:register_control", [section_id, key, var_to_str(config)])
+		if _sections.has(section_id):
+			_sections[section_id].controls.append(full_key)
+		return
+
 	var control_type: String = config.get("type", "")
 	var control_node: Control = null
 	match control_type:
@@ -155,7 +204,10 @@ func unregister_section(section_id: String) -> void:
 	if section_data.ref_count <= 0:
 		for ctrl_key in section_data.controls:
 			_control_nodes.erase(ctrl_key)
-		if section_data.container != null:
+			_control_configs.erase(ctrl_key)
+		if _editor_mode:
+			EngineDebugger.send_message("gdtuner:unregister_section", [section_id])
+		elif section_data.container != null:
 			section_data.container.queue_free()
 		_sections.erase(section_id)
 
@@ -358,6 +410,9 @@ func _get_or_create_button_flow(section_data: Dictionary) -> FlowContainer:
 # --- Control Factories ---
 
 func _create_slider_control(full_key: String, config: Dictionary) -> Control:
+	if _is_mobile:
+		return _create_stepper_control(full_key, config)
+
 	var is_int: bool = config.get("type") == "int"
 	var vbox := VBoxContainer.new()
 	vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -403,6 +458,60 @@ func _create_slider_control(full_key: String, config: Dictionary) -> Control:
 	)
 
 	return vbox
+
+
+func _create_stepper_control(full_key: String, config: Dictionary) -> Control:
+	var is_int: bool = config.get("type") == "int"
+	var min_val: float = config.get("min", 0.0)
+	var max_val: float = config.get("max", 1.0)
+	var step: float = config.get("step", 0.01 if not is_int else 1)
+	var hbox := HBoxContainer.new()
+	hbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	var label := Label.new()
+	label.text = config.get("label", full_key.get_slice("/", 1))
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	hbox.add_child(label)
+
+	var minus_btn := Button.new()
+	minus_btn.text = "-"
+	minus_btn.custom_minimum_size = Vector2(44, 44)
+	hbox.add_child(minus_btn)
+
+	var value_label := Label.new()
+	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	value_label.custom_minimum_size.x = 60
+	value_label.text = _format_number(_values[full_key], is_int)
+	hbox.add_child(value_label)
+
+	var plus_btn := Button.new()
+	plus_btn.text = "+"
+	plus_btn.custom_minimum_size = Vector2(44, 44)
+	hbox.add_child(plus_btn)
+
+	var reset_btn := Button.new()
+	reset_btn.text = "↺"
+	reset_btn.custom_minimum_size = Vector2(44, 44)
+	hbox.add_child(reset_btn)
+
+	var apply_step := func(direction: float) -> void:
+		var current: float = _values[full_key]
+		var new_val: float = clampf(current + step * direction, min_val, max_val)
+		var final_val: Variant = int(new_val) if is_int else new_val
+		_set_value(full_key, final_val)
+		value_label.text = _format_number(final_val, is_int)
+
+	minus_btn.pressed.connect(func() -> void: apply_step.call(-1.0))
+	plus_btn.pressed.connect(func() -> void: apply_step.call(1.0))
+
+	reset_btn.pressed.connect(func() -> void:
+		var def: Variant = _defaults[full_key]
+		var final_val: Variant = int(def) if is_int else def
+		_set_value(full_key, final_val)
+		value_label.text = _format_number(final_val, is_int)
+	)
+
+	return hbox
 
 
 func _create_checkbox_control(full_key: String, config: Dictionary) -> Control:
@@ -515,9 +624,10 @@ func _create_vector2_control(full_key: String, config: Dictionary) -> Control:
 	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(label)
 
+	var btn_size := Vector2(44, 44) if _is_mobile else Vector2(28, 28)
 	var reset_btn := Button.new()
 	reset_btn.text = "↺"
-	reset_btn.custom_minimum_size = Vector2(28, 28)
+	reset_btn.custom_minimum_size = btn_size
 	header.add_child(reset_btn)
 	vbox.add_child(header)
 
@@ -526,49 +636,103 @@ func _create_vector2_control(full_key: String, config: Dictionary) -> Control:
 	var max_val: Vector2 = config.get("max", Vector2(100, 100))
 	var step: float = config.get("step", 1.0)
 
-	var sliders: Array[HSlider] = []
 	var value_labels: Array[Label] = []
 	var axes := ["x", "y"]
 
-	for i in 2:
-		var row := HBoxContainer.new()
-		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var axis_label := Label.new()
-		axis_label.text = "  %s:" % axes[i]
-		axis_label.custom_minimum_size.x = 30
-		row.add_child(axis_label)
+	if _is_mobile:
+		var axis_values: Array[float] = [current.x, current.y]
+		var axis_mins: Array[float] = [min_val.x, min_val.y]
+		var axis_maxs: Array[float] = [max_val.x, max_val.y]
+		for i in 2:
+			var row := HBoxContainer.new()
+			row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var axis_label := Label.new()
+			axis_label.text = "  %s:" % axes[i]
+			axis_label.custom_minimum_size.x = 30
+			row.add_child(axis_label)
 
-		var slider := HSlider.new()
-		slider.min_value = min_val[axes[i]]
-		slider.max_value = max_val[axes[i]]
-		slider.step = step
-		slider.value = current[axes[i]]
-		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_child(slider)
-		sliders.append(slider)
+			var minus_btn := Button.new()
+			minus_btn.text = "-"
+			minus_btn.custom_minimum_size = Vector2(44, 44)
+			row.add_child(minus_btn)
 
-		var val_label := Label.new()
-		val_label.text = _format_number(current[axes[i]], false)
-		val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		val_label.custom_minimum_size.x = 50
-		row.add_child(val_label)
-		value_labels.append(val_label)
+			var val_label := Label.new()
+			val_label.text = _format_number(axis_values[i], false)
+			val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			val_label.custom_minimum_size.x = 60
+			val_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			row.add_child(val_label)
+			value_labels.append(val_label)
 
-		vbox.add_child(row)
+			var plus_btn := Button.new()
+			plus_btn.text = "+"
+			plus_btn.custom_minimum_size = Vector2(44, 44)
+			row.add_child(plus_btn)
 
-	var update_fn := func(_val: float) -> void:
-		var vec := Vector2(sliders[0].value, sliders[1].value)
-		_set_value(full_key, vec)
-		for j in 2:
-			value_labels[j].text = _format_number(vec[axes[j]], false)
+			var axis_idx := i
+			minus_btn.pressed.connect(func() -> void:
+				var vec: Vector2 = _values[full_key]
+				vec[axes[axis_idx]] = clampf(vec[axes[axis_idx]] - step, axis_mins[axis_idx], axis_maxs[axis_idx])
+				_set_value(full_key, vec)
+				for j in 2:
+					value_labels[j].text = _format_number(vec[axes[j]], false)
+			)
+			plus_btn.pressed.connect(func() -> void:
+				var vec: Vector2 = _values[full_key]
+				vec[axes[axis_idx]] = clampf(vec[axes[axis_idx]] + step, axis_mins[axis_idx], axis_maxs[axis_idx])
+				_set_value(full_key, vec)
+				for j in 2:
+					value_labels[j].text = _format_number(vec[axes[j]], false)
+			)
+			vbox.add_child(row)
+	else:
+		var sliders: Array[HSlider] = []
+		for i in 2:
+			var row := HBoxContainer.new()
+			row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var axis_label := Label.new()
+			axis_label.text = "  %s:" % axes[i]
+			axis_label.custom_minimum_size.x = 30
+			row.add_child(axis_label)
 
-	for slider in sliders:
-		slider.value_changed.connect(update_fn)
+			var slider := HSlider.new()
+			slider.min_value = min_val[axes[i]]
+			slider.max_value = max_val[axes[i]]
+			slider.step = step
+			slider.value = current[axes[i]]
+			slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			row.add_child(slider)
+			sliders.append(slider)
+
+			var val_label := Label.new()
+			val_label.text = _format_number(current[axes[i]], false)
+			val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			val_label.custom_minimum_size.x = 50
+			row.add_child(val_label)
+			value_labels.append(val_label)
+
+			vbox.add_child(row)
+
+		var update_fn := func(_val: float) -> void:
+			var vec := Vector2(sliders[0].value, sliders[1].value)
+			_set_value(full_key, vec)
+			for j in 2:
+				value_labels[j].text = _format_number(vec[axes[j]], false)
+		for slider in sliders:
+			slider.value_changed.connect(update_fn)
+
+		reset_btn.pressed.connect(func() -> void:
+			var def: Vector2 = _defaults[full_key]
+			sliders[0].value = def.x
+			sliders[1].value = def.y
+			_set_value(full_key, def)
+			value_labels[0].text = _format_number(def.x, false)
+			value_labels[1].text = _format_number(def.y, false)
+		)
+		return vbox
 
 	reset_btn.pressed.connect(func() -> void:
 		var def: Vector2 = _defaults[full_key]
-		sliders[0].value = def.x
-		sliders[1].value = def.y
 		_set_value(full_key, def)
 		value_labels[0].text = _format_number(def.x, false)
 		value_labels[1].text = _format_number(def.y, false)
@@ -587,9 +751,10 @@ func _create_vector3_control(full_key: String, config: Dictionary) -> Control:
 	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(label)
 
+	var btn_size := Vector2(44, 44) if _is_mobile else Vector2(28, 28)
 	var reset_btn := Button.new()
 	reset_btn.text = "↺"
-	reset_btn.custom_minimum_size = Vector2(28, 28)
+	reset_btn.custom_minimum_size = btn_size
 	header.add_child(reset_btn)
 	vbox.add_child(header)
 
@@ -598,50 +763,105 @@ func _create_vector3_control(full_key: String, config: Dictionary) -> Control:
 	var max_val: Vector3 = config.get("max", Vector3(100, 100, 100))
 	var step: float = config.get("step", 1.0)
 
-	var sliders: Array[HSlider] = []
 	var value_labels: Array[Label] = []
 	var axes := ["x", "y", "z"]
 
-	for i in 3:
-		var row := HBoxContainer.new()
-		row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		var axis_label := Label.new()
-		axis_label.text = "  %s:" % axes[i]
-		axis_label.custom_minimum_size.x = 30
-		row.add_child(axis_label)
+	if _is_mobile:
+		var axis_values: Array[float] = [current.x, current.y, current.z]
+		var axis_mins: Array[float] = [min_val.x, min_val.y, min_val.z]
+		var axis_maxs: Array[float] = [max_val.x, max_val.y, max_val.z]
+		for i in 3:
+			var row := HBoxContainer.new()
+			row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var axis_label := Label.new()
+			axis_label.text = "  %s:" % axes[i]
+			axis_label.custom_minimum_size.x = 30
+			row.add_child(axis_label)
 
-		var slider := HSlider.new()
-		slider.min_value = min_val[axes[i]]
-		slider.max_value = max_val[axes[i]]
-		slider.step = step
-		slider.value = current[axes[i]]
-		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		row.add_child(slider)
-		sliders.append(slider)
+			var minus_btn := Button.new()
+			minus_btn.text = "-"
+			minus_btn.custom_minimum_size = Vector2(44, 44)
+			row.add_child(minus_btn)
 
-		var val_label := Label.new()
-		val_label.text = _format_number(current[axes[i]], false)
-		val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		val_label.custom_minimum_size.x = 50
-		row.add_child(val_label)
-		value_labels.append(val_label)
+			var val_label := Label.new()
+			val_label.text = _format_number(axis_values[i], false)
+			val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+			val_label.custom_minimum_size.x = 60
+			val_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			row.add_child(val_label)
+			value_labels.append(val_label)
 
-		vbox.add_child(row)
+			var plus_btn := Button.new()
+			plus_btn.text = "+"
+			plus_btn.custom_minimum_size = Vector2(44, 44)
+			row.add_child(plus_btn)
 
-	var update_fn := func(_val: float) -> void:
-		var vec := Vector3(sliders[0].value, sliders[1].value, sliders[2].value)
-		_set_value(full_key, vec)
-		for j in 3:
-			value_labels[j].text = _format_number(vec[axes[j]], false)
+			var axis_idx := i
+			minus_btn.pressed.connect(func() -> void:
+				var vec: Vector3 = _values[full_key]
+				vec[axes[axis_idx]] = clampf(vec[axes[axis_idx]] - step, axis_mins[axis_idx], axis_maxs[axis_idx])
+				_set_value(full_key, vec)
+				for j in 3:
+					value_labels[j].text = _format_number(vec[axes[j]], false)
+			)
+			plus_btn.pressed.connect(func() -> void:
+				var vec: Vector3 = _values[full_key]
+				vec[axes[axis_idx]] = clampf(vec[axes[axis_idx]] + step, axis_mins[axis_idx], axis_maxs[axis_idx])
+				_set_value(full_key, vec)
+				for j in 3:
+					value_labels[j].text = _format_number(vec[axes[j]], false)
+			)
+			vbox.add_child(row)
+	else:
+		var sliders: Array[HSlider] = []
+		for i in 3:
+			var row := HBoxContainer.new()
+			row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			var axis_label := Label.new()
+			axis_label.text = "  %s:" % axes[i]
+			axis_label.custom_minimum_size.x = 30
+			row.add_child(axis_label)
 
-	for slider in sliders:
-		slider.value_changed.connect(update_fn)
+			var slider := HSlider.new()
+			slider.min_value = min_val[axes[i]]
+			slider.max_value = max_val[axes[i]]
+			slider.step = step
+			slider.value = current[axes[i]]
+			slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			row.add_child(slider)
+			sliders.append(slider)
+
+			var val_label := Label.new()
+			val_label.text = _format_number(current[axes[i]], false)
+			val_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+			val_label.custom_minimum_size.x = 50
+			row.add_child(val_label)
+			value_labels.append(val_label)
+
+			vbox.add_child(row)
+
+		var update_fn := func(_val: float) -> void:
+			var vec := Vector3(sliders[0].value, sliders[1].value, sliders[2].value)
+			_set_value(full_key, vec)
+			for j in 3:
+				value_labels[j].text = _format_number(vec[axes[j]], false)
+		for slider in sliders:
+			slider.value_changed.connect(update_fn)
+
+		reset_btn.pressed.connect(func() -> void:
+			var def: Vector3 = _defaults[full_key]
+			sliders[0].value = def.x
+			sliders[1].value = def.y
+			sliders[2].value = def.z
+			_set_value(full_key, def)
+			value_labels[0].text = _format_number(def.x, false)
+			value_labels[1].text = _format_number(def.y, false)
+			value_labels[2].text = _format_number(def.z, false)
+		)
+		return vbox
 
 	reset_btn.pressed.connect(func() -> void:
 		var def: Vector3 = _defaults[full_key]
-		sliders[0].value = def.x
-		sliders[1].value = def.y
-		sliders[2].value = def.z
 		_set_value(full_key, def)
 		value_labels[0].text = _format_number(def.x, false)
 		value_labels[1].text = _format_number(def.y, false)
@@ -654,6 +874,8 @@ func _create_vector3_control(full_key: String, config: Dictionary) -> Control:
 func _create_button_control(full_key: String, config: Dictionary) -> Control:
 	var btn := Button.new()
 	btn.text = config.get("label", full_key.get_slice("/", 1))
+	if _is_mobile:
+		btn.custom_minimum_size = Vector2(0, 44)
 	btn.pressed.connect(func() -> void:
 		print("[gdtuner:action] %s pressed" % full_key)
 		button_pressed.emit(full_key)
@@ -667,6 +889,8 @@ func _set_value(key: String, value: Variant) -> void:
 	_values[key] = value
 	print("[gdtuner] %s = %s" % [key, _format_value(value)])
 	value_changed.emit(key, value)
+	if _editor_mode and not _suppress_editor_notify:
+		EngineDebugger.send_message("gdtuner:value_changed", [key, var_to_str(value)])
 
 
 func _format_value(val: Variant) -> String:
