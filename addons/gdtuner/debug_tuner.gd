@@ -15,8 +15,7 @@ var _suppress_editor_notify: bool = false
 var _window: Window = null
 var _overlay: CanvasLayer = null
 var _sheet: PanelContainer = null
-var _scroll: ScrollContainer = null
-var _main_vbox: VBoxContainer = null
+var _tab_container: TabContainer = null
 var _values: Dictionary = {}
 var _defaults: Dictionary = {}
 var _sections: Dictionary = {}  # section_id -> { display_name, container, header, ref_count, controls }
@@ -137,7 +136,6 @@ func register_section(section_id: String, display_name: String, script_path: Str
 		"content": null,
 		"ref_count": 1,
 		"controls": [],
-		"collapsed": false,
 	}
 	if _editor_mode:
 		EngineDebugger.send_message("gdtuner:register_section", [section_id, display_name, script_path])
@@ -250,14 +248,10 @@ func _build_content(parent: Control) -> void:
 	outer_vbox.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	margin.add_child(outer_vbox)
 
-	_scroll = ScrollContainer.new()
-	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	outer_vbox.add_child(_scroll)
-
-	_main_vbox = VBoxContainer.new()
-	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll.add_child(_main_vbox)
+	_tab_container = TabContainer.new()
+	_tab_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tab_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	outer_vbox.add_child(_tab_container)
 
 	var btn_row := HBoxContainer.new()
 	outer_vbox.add_child(btn_row)
@@ -350,50 +344,29 @@ func _create_sheet() -> void:
 # --- Section UI ---
 
 func _build_section_ui(section_id: String, section_data: Dictionary) -> void:
-	var container := VBoxContainer.new()
-	container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 
-	var header := Button.new()
-	header.text = "  %s" % section_data.display_name
-	header.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	header.flat = true
-	header.add_theme_font_size_override("font_size", 15)
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.15, 0.15, 0.15, 1.0)
-	style.content_margin_left = 6.0
-	style.content_margin_top = 4.0
-	style.content_margin_bottom = 4.0
-	style.corner_radius_top_left = 4
-	style.corner_radius_top_right = 4
-	style.corner_radius_bottom_left = 4
-	style.corner_radius_bottom_right = 4
-	header.add_theme_stylebox_override("normal", style)
-	var hover_style := style.duplicate()
-	hover_style.bg_color = Color(0.2, 0.2, 0.2, 1.0)
-	header.add_theme_stylebox_override("hover", hover_style)
-	header.add_theme_stylebox_override("pressed", style)
-	container.add_child(header)
+	var content_margin := MarginContainer.new()
+	content_margin.add_theme_constant_override("margin_left", 8)
+	content_margin.add_theme_constant_override("margin_right", 8)
+	content_margin.add_theme_constant_override("margin_top", 8)
+	content_margin.add_theme_constant_override("margin_bottom", 8)
+	content_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(content_margin)
 
 	var content := VBoxContainer.new()
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var content_margin := MarginContainer.new()
-	content_margin.add_theme_constant_override("margin_left", 8)
-	content_margin.add_theme_constant_override("margin_top", 4)
-	content_margin.add_theme_constant_override("margin_bottom", 4)
 	content_margin.add_child(content)
-	container.add_child(content_margin)
 
-	header.pressed.connect(func() -> void:
-		section_data.collapsed = not section_data.collapsed
-		content_margin.visible = not section_data.collapsed
-		header.text = ("  %s" if not section_data.collapsed else "  %s") % section_data.display_name
-	)
+	scroll.name = section_data.display_name
+	_tab_container.add_child(scroll)
 
-	section_data.container = container
-	section_data.header = header
+	section_data.container = scroll
+	section_data.header = null
 	section_data.content = content
-
-	_main_vbox.add_child(container)
 
 
 func _get_or_create_button_flow(section_data: Dictionary) -> FlowContainer:
@@ -440,6 +413,7 @@ func _create_slider_control(full_key: String, config: Dictionary) -> Control:
 	slider.max_value = config.get("max", 1.0)
 	slider.step = config.get("step", 0.01 if not is_int else 1)
 	slider.value = _values[full_key]
+	slider.scrollable = false
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_child(slider)
 
@@ -700,6 +674,7 @@ func _create_vector2_control(full_key: String, config: Dictionary) -> Control:
 			slider.max_value = max_val[axes[i]]
 			slider.step = step
 			slider.value = current[axes[i]]
+			slider.scrollable = false
 			slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			row.add_child(slider)
 			sliders.append(slider)
@@ -827,6 +802,7 @@ func _create_vector3_control(full_key: String, config: Dictionary) -> Control:
 			slider.max_value = max_val[axes[i]]
 			slider.step = step
 			slider.value = current[axes[i]]
+			slider.scrollable = false
 			slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 			row.add_child(slider)
 			sliders.append(slider)

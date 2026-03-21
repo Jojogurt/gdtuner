@@ -5,8 +5,7 @@ signal request_set_value(full_key: String, value_str: String)
 signal request_press_button(full_key: String)
 signal request_bake()
 
-var _scroll: ScrollContainer = null
-var _main_vbox: VBoxContainer = null
+var _tab_container: TabContainer = null
 var _status_label: Label = null
 var _toolbar: HBoxContainer = null
 var _sections: Dictionary = {}
@@ -30,16 +29,11 @@ func _build_layout() -> void:
 	_status_label.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(_status_label)
 
-	_scroll = ScrollContainer.new()
-	_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	_scroll.visible = false
-	add_child(_scroll)
-
-	_main_vbox = VBoxContainer.new()
-	_main_vbox.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_scroll.add_child(_main_vbox)
+	_tab_container = TabContainer.new()
+	_tab_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_tab_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tab_container.visible = false
+	add_child(_tab_container)
 
 	_toolbar = HBoxContainer.new()
 	_toolbar.visible = false
@@ -60,13 +54,13 @@ func _build_layout() -> void:
 
 func _show_status() -> void:
 	_status_label.visible = true
-	_scroll.visible = false
+	_tab_container.visible = false
 	_toolbar.visible = false
 
 
 func _show_controls() -> void:
 	_status_label.visible = false
-	_scroll.visible = true
+	_tab_container.visible = true
 	_toolbar.visible = true
 
 
@@ -81,7 +75,7 @@ func session_stopped() -> void:
 
 
 func _clear_all() -> void:
-	for child in _main_vbox.get_children():
+	for child in _tab_container.get_children():
 		child.queue_free()
 	_sections.clear()
 	_values.clear()
@@ -118,7 +112,6 @@ func handle_register_section(section_id: String, display_name: String) -> void:
 		"content": null,
 		"ref_count": 1,
 		"controls": [],
-		"collapsed": false,
 	}
 	_build_section_ui(section_id, section_data)
 	_sections[section_id] = section_data
@@ -215,50 +208,29 @@ func handle_unregister_section(section_id: String) -> void:
 # --- Section UI ---
 
 func _build_section_ui(section_id: String, section_data: Dictionary) -> void:
-	var container := VBoxContainer.new()
-	container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
 
-	var header := Button.new()
-	header.text = "  %s" % section_data.display_name
-	header.alignment = HORIZONTAL_ALIGNMENT_LEFT
-	header.flat = true
-	header.add_theme_font_size_override("font_size", 15)
-	var style := StyleBoxFlat.new()
-	style.bg_color = Color(0.15, 0.15, 0.15, 1.0)
-	style.content_margin_left = 6.0
-	style.content_margin_top = 4.0
-	style.content_margin_bottom = 4.0
-	style.corner_radius_top_left = 4
-	style.corner_radius_top_right = 4
-	style.corner_radius_bottom_left = 4
-	style.corner_radius_bottom_right = 4
-	header.add_theme_stylebox_override("normal", style)
-	var hover_style := style.duplicate()
-	hover_style.bg_color = Color(0.2, 0.2, 0.2, 1.0)
-	header.add_theme_stylebox_override("hover", hover_style)
-	header.add_theme_stylebox_override("pressed", style)
-	container.add_child(header)
+	var content_margin := MarginContainer.new()
+	content_margin.add_theme_constant_override("margin_left", 8)
+	content_margin.add_theme_constant_override("margin_right", 8)
+	content_margin.add_theme_constant_override("margin_top", 8)
+	content_margin.add_theme_constant_override("margin_bottom", 8)
+	content_margin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(content_margin)
 
 	var content := VBoxContainer.new()
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	var content_margin := MarginContainer.new()
-	content_margin.add_theme_constant_override("margin_left", 8)
-	content_margin.add_theme_constant_override("margin_top", 4)
-	content_margin.add_theme_constant_override("margin_bottom", 4)
 	content_margin.add_child(content)
-	container.add_child(content_margin)
 
-	header.pressed.connect(func() -> void:
-		section_data.collapsed = not section_data.collapsed
-		content_margin.visible = not section_data.collapsed
-		header.text = ("  %s" if not section_data.collapsed else "  %s") % section_data.display_name
-	)
+	scroll.name = section_data.display_name
+	_tab_container.add_child(scroll)
 
-	section_data.container = container
-	section_data.header = header
+	section_data.container = scroll
+	section_data.header = null
 	section_data.content = content
-
-	_main_vbox.add_child(container)
 
 
 func _get_or_create_button_flow(section_data: Dictionary) -> FlowContainer:
@@ -302,6 +274,7 @@ func _create_slider(full_key: String, config: Dictionary) -> Control:
 	slider.max_value = config.get("max", 1.0)
 	slider.step = config.get("step", 0.01 if not is_int else 1)
 	slider.value = _values[full_key]
+	slider.scrollable = false
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	vbox.add_child(slider)
 
@@ -483,6 +456,7 @@ func _create_vector2(full_key: String, config: Dictionary) -> Control:
 		slider.max_value = max_val[axes[i]]
 		slider.step = step
 		slider.value = current[axes[i]]
+		slider.scrollable = false
 		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(slider)
 		sliders.append(slider)
@@ -559,6 +533,7 @@ func _create_vector3(full_key: String, config: Dictionary) -> Control:
 		slider.max_value = max_val[axes[i]]
 		slider.step = step
 		slider.value = current[axes[i]]
+		slider.scrollable = false
 		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(slider)
 		sliders.append(slider)

@@ -33,7 +33,7 @@ func _enter_tree() -> void:
 	)
 
 	add_debugger_plugin(_debugger)
-	add_control_to_bottom_panel(_panel, "gdtuner")
+	add_control_to_bottom_panel(_panel, "GDTuner")
 
 
 func _exit_tree() -> void:
