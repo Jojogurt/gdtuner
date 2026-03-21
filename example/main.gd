@@ -1,29 +1,25 @@
 extends Node2D
 
-@onready var sprite: Sprite2D = $Sprite
+## GDTuner Example — three ways to use the tuner:
+##
+## 1. AutoTunable (Player node)
+##    Drop as child, mark exports with @export_group("tunable").
+##    Property binding — sliders set values directly on the node.
+##
+## 2. UITunable (Title label)
+##    Drop as child of any Control. Auto-exposes modulate,
+##    theme colors, font sizes, and StyleBox properties.
+##
+## 3. TunableRegistrar (TorchTuner node)
+##    Manual registration — full control over what appears.
+##    Game code reads values via DebugTuner.get_value().
+
 @onready var light: PointLight2D = $Light
-
-
-func _ready() -> void:
-	DebugTuner.value_changed.connect(_on_value_changed)
-	DebugTuner.button_pressed.connect(_on_button_pressed)
 
 
 func _process(_delta: float) -> void:
 	if not OS.is_debug_build():
 		return
-
+	# Manual TunableRegistrar values — read explicitly via get_value()
 	light.energy = DebugTuner.get_value("torch/intensity", 1.0)
 	light.color = DebugTuner.get_value("torch/color", Color.WHITE)
-	sprite.position = DebugTuner.get_value("torch/offset", Vector2(512, 300))
-	sprite.visible = DebugTuner.get_value("gameplay/show_sprite", true)
-
-
-func _on_value_changed(key: String, value: Variant) -> void:
-	pass  # Values are read in _process, but you could react here too
-
-
-func _on_button_pressed(key: String) -> void:
-	if key == "gameplay/reset_position":
-		sprite.position = Vector2(512, 300)
-		light.position = Vector2(512, 300)
