@@ -87,9 +87,9 @@ func _build_config(prop: Dictionary, current: Variant) -> Dictionary:
 	var hint_min := 0.0
 	var hint_max := 0.0
 	var hint_step := 0.0
-	var has_hint := prop.hint == PROPERTY_HINT_RANGE and not prop.hint_string.is_empty()
+	var has_hint: bool = prop.hint == PROPERTY_HINT_RANGE and not prop.hint_string.is_empty()
 	if has_hint:
-		var parts := prop.hint_string.split(",")
+		var parts: PackedStringArray = prop.hint_string.split(",")
 		if parts.size() >= 2:
 			hint_min = parts[0].to_float()
 			hint_max = parts[1].to_float()
