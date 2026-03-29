@@ -956,15 +956,18 @@ func _bake_export_var(source: String, key: String, value: Variant) -> String:
 	## Also handles trailing colon for setter: @export var <key>: <type> = <old_value>:
 	var lines := source.split("\n")
 	var pattern := RegEx.new()
-	pattern.compile("^(\\s*@export\\s+var\\s+" + key + "\\s*(?::\\s*\\w+)?\\s*=\\s*)(.*\\S)\\s*(:|$)")
+	pattern.compile("^(\\s*@export\\s+var\\s+" + key + "\\s*(?::\\s*\\w+)?\\s*=\\s*)(.+?)\\s*$")
 	for i in range(lines.size()):
 		var m := pattern.search(lines[i])
 		if m == null:
 			continue
 		var prefix_str: String = m.get_string(1)
-		var suffix_str: String = m.get_string(3)
+		var old_val: String = m.get_string(2)
+		var has_setter: bool = old_val.ends_with(":")
+		if has_setter:
+			old_val = old_val.substr(0, old_val.length() - 1).strip_edges()
 		var new_val := _format_bake_value(value)
-		lines[i] = prefix_str + new_val + suffix_str
+		lines[i] = prefix_str + new_val + (":" if has_setter else "")
 		return "\n".join(lines)
 	return source
 
