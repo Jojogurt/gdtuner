@@ -31,7 +31,8 @@ func _ready() -> void:
 	var tuner := _get_tuner()
 	if not tuner:
 		return
-	tuner.register_section(section_id, section_name)
+	var script_path: String = _target.get_script().resource_path if _target.get_script() else ""
+	tuner.register_section(section_id, section_name, script_path)
 	_register_direct_properties(tuner)
 	_register_theme_overrides(tuner)
 	_register_stylebox_properties(tuner)
