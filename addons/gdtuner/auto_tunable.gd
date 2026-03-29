@@ -36,7 +36,8 @@ func _ready() -> void:
 	var props := _scan_tunable_exports()
 	if props.is_empty():
 		return
-	tuner.register_section(section_id, section_name)
+	var script_path: String = _target.get_script().resource_path if _target.get_script() else ""
+	tuner.register_section(section_id, section_name, script_path)
 	for prop in props:
 		_register_property(tuner, prop)
 	tuner.value_changed.connect(_on_value_changed)

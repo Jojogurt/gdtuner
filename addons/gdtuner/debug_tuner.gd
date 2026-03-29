@@ -944,9 +944,36 @@ func bake_all_values() -> void:
 
 
 func _bake_control_value(source: String, config: Dictionary, key: String, value: Variant) -> String:
+	# Try @export var pattern first (AutoTunable), fall back to add_* pattern (TunableRegistrar)
+	var export_result := _bake_export_var(source, key, value)
+	if export_result != source:
+		return export_result
+	return _bake_registrar_call(source, config, key, value)
+
+
+func _bake_export_var(source: String, key: String, value: Variant) -> String:
+	## Matches: @export var <key>: <type> = <old_value>
+	## Also handles trailing colon for setter: @export var <key>: <type> = <old_value>:
+	var lines := source.split("\n")
+	var pattern := RegEx.new()
+	pattern.compile("^(\\s*@export\\s+var\\s+" + key + "\\s*(?::\\s*\\w+)?\\s*=\\s*)(.*\\S)\\s*(:|$)")
+	for i in range(lines.size()):
+		var m := pattern.search(lines[i])
+		if m == null:
+			continue
+		var prefix_str: String = m.get_string(1)
+		var suffix_str: String = m.get_string(3)
+		var new_val := _format_bake_value(value)
+		lines[i] = prefix_str + new_val + suffix_str
+		return "\n".join(lines)
+	return source
+
+
+func _bake_registrar_call(source: String, config: Dictionary, key: String, value: Variant) -> String:
+	## Legacy: matches add_float("key", ...) patterns from TunableRegistrar scripts.
 	var control_type: String = config.get("type", "")
 	var method_name: String
-	var default_arg_index: int  # 0-based, counting from after opening paren
+	var default_arg_index: int
 	match control_type:
 		"float":
 			method_name = "add_float"
@@ -972,14 +999,12 @@ func _bake_control_value(source: String, config: Dictionary, key: String, value:
 		_:
 			return source
 
-	# Find the method call for this key
 	var regex := RegEx.new()
 	regex.compile(method_name + '\\s*\\(\\s*"' + key + '"')
 	var result := regex.search(source)
 	if result == null:
 		return source
 
-	# Find the opening paren and its matching close
 	var paren_start := source.find("(", result.get_start())
 	var paren_end := _find_matching_paren(source, paren_start)
 	if paren_end < 0:
@@ -990,37 +1015,36 @@ func _bake_control_value(source: String, config: Dictionary, key: String, value:
 	if default_arg_index >= args.size():
 		return source
 
-	# Format the new value
-	var new_value_str: String
-	match control_type:
-		"float":
-			new_value_str = str(value)
-		"int":
-			new_value_str = str(int(value))
-		"bool":
-			new_value_str = "true" if value else "false"
-		"color":
-			new_value_str = "Color(%s, %s, %s, %s)" % [value.r, value.g, value.b, value.a]
-		"vector2":
-			new_value_str = "Vector2(%s, %s)" % [value.x, value.y]
-		"vector3":
-			new_value_str = "Vector3(%s, %s, %s)" % [value.x, value.y, value.z]
-		"dropdown":
-			var options: Array = config.get("options", [])
-			var idx := options.find(value)
-			if idx < 0:
-				idx = 0
-			new_value_str = str(idx)
+	var new_value_str := _format_bake_value(value)
+	if control_type == "dropdown":
+		var options: Array = config.get("options", [])
+		var idx := options.find(value)
+		new_value_str = str(maxi(idx, 0))
 
-	# Preserve surrounding whitespace in the argument
 	var old_arg: String = args[default_arg_index]
 	var trimmed := old_arg.strip_edges()
-	var prefix := old_arg.substr(0, old_arg.find(trimmed))
-	var suffix := old_arg.substr(old_arg.find(trimmed) + trimmed.length())
-	args[default_arg_index] = prefix + new_value_str + suffix
+	var prefix_str := old_arg.substr(0, old_arg.find(trimmed))
+	var suffix_str := old_arg.substr(old_arg.find(trimmed) + trimmed.length())
+	args[default_arg_index] = prefix_str + new_value_str + suffix_str
 
 	var new_args_str := ",".join(args)
 	return source.substr(0, paren_start + 1) + new_args_str + source.substr(paren_end)
+
+
+func _format_bake_value(value: Variant) -> String:
+	if value is float:
+		return str(value)
+	if value is int:
+		return str(value)
+	if value is bool:
+		return "true" if value else "false"
+	if value is Color:
+		return "Color(%s, %s, %s, %s)" % [value.r, value.g, value.b, value.a]
+	if value is Vector2:
+		return "Vector2(%s, %s)" % [value.x, value.y]
+	if value is Vector3:
+		return "Vector3(%s, %s, %s)" % [value.x, value.y, value.z]
+	return str(value)
 
 
 func _find_matching_paren(source: String, open_pos: int) -> int:
